@@ -20,8 +20,8 @@ int foreground_mode = 0;  // 1 to set to foreground only mode
 struct command
 {
     char *cmd;  // main command
-    char *argv[MAXARGS];  // Array of 512 arguments with length of 256
-    int argc;  // Number of arguments
+    char *argv[MAXARGS];  // arguments
+    int argc;  // number of arguments
     char *input;  // Input file
     char *output; // Output file
     bool background;  // Boolean to indicate background execution
@@ -33,8 +33,12 @@ struct command
 void getInput(struct command *user_cmd)
 {
     char input[MAXLINE];  // String array to hold user input
+    user_cmd->background = false;  // Initialize background to false
+    user_cmd->argc = 0;  // Initialize argc to 0
+
     // Iterators for $$ variable expansion
     int i;
+
 
     // Prompt user for input
     printf(": ");
@@ -42,27 +46,19 @@ void getInput(struct command *user_cmd)
     fgets(input, MAXLINE, stdin);
 
     // Remove newline character
-    input[strlen(input) - 1] = '\0';
+    input[strcspn(input, "\n")] = 0;
 
     // If user enters nothing, update struct with empty string
     if (strlen(input) == 0)
     {
         user_cmd->cmd = "";
-        user_cmd->argc = 0;
-        user_cmd->input = "";
-        user_cmd->output = "";
-        user_cmd->background = false;
         return;
     }
 
     // If user enters a comment, update struct command with '#'
     if (input[0] == '#')
     {
-        user_cmd->cmd = "#";
-        user_cmd->argc = 0;
-        user_cmd->input = "";
-        user_cmd->output = "";
-        user_cmd->background = false;
+        user_cmd->cmd = "";
         return;
     }
 
@@ -75,10 +71,10 @@ void getInput(struct command *user_cmd)
 
     // Iterate through tokens and store in struct
     while(token != NULL){
-        // Check for background execution
-        if (strcmp(token, "&") == 0)
+        if (strcmp(token, "&") == 0 && input[strlen(input) - 1] != '&')  // Check for background execution and if its the last token
         {
             user_cmd->background = true;
+            token = strtok(NULL, " ");
         } else if (strcmp(token, "<") == 0)  // Check for input redirection
         {
             token = strtok(NULL, " ");
@@ -95,9 +91,9 @@ void getInput(struct command *user_cmd)
             {
                 char *temp = strstr(token, "$$");
 
+                // If substring is found, replace token with string before substring concatenated with pid
                 if (temp)
                 {
-                    // Replace token with string before $$ concatenated with pid
                     char pid[10];
                     sprintf(pid, "%d", getpid());
                     char *temp2 = calloc(strlen(token) + strlen(pid) + 1, sizeof(char));
@@ -107,16 +103,15 @@ void getInput(struct command *user_cmd)
                     token = temp2;
                     free(temp2);
                 }
-                free(temp);
             }
-            user_cmd->argv[user_cmd->argc] = calloc(strlen(token) + 1, sizeof(char));
-            strcpy(user_cmd->argv[user_cmd->argc], token);
+            // Add token to args
+            user_cmd->argv[user_cmd->argc] = token;
             user_cmd->argc++;
         }
         token = strtok(NULL, " ");
+        user_cmd->argv[user_cmd->argc] = NULL;  // Indicate end of args
+        return;
     }
-    free(token);
-
 }
 
 /*
@@ -135,7 +130,7 @@ void executeOtherCommand(struct command *user_cmd)
     switch(spawn_pid)
     {
         case -1:
-            perror("fork() failed!");
+            perror("fork() failed!\n");
             exit(1);
             break;
         case 0:
@@ -175,45 +170,19 @@ void executeOtherCommand(struct command *user_cmd)
             if (user_cmd->background)
             {
                 waitpid(spawn_pid, &status, WNOHANG);
+                printf("Background pid is %d\n", spawn_pid);
+                fflush(stdout);
             } else {
                 waitpid(spawn_pid, &status, 0);
             }
     }
 }
 
-/*
-* Free the memory allocated to the struct
-*/
-void freeCommand(struct command *user_cmd)
-{
-    // If the command is not a comment or empty, free the memory
-    if (strcmp(user_cmd->cmd, "#") != 0 && strlen(user_cmd->cmd) != 0)
-    {
-        free(user_cmd->cmd);
-        for (int i = 0; i < user_cmd->argc; i++)
-        {
-            free(user_cmd->argv[i]);
-        }
-
-    }
-   
-    // If input or output is not null or empty, free the memory
-    if (user_cmd->input != NULL && strlen(user_cmd->input) != 0)
-    {
-        free(user_cmd->input);
-    }
-    if (user_cmd->output != NULL && strlen(user_cmd->output) != 0)
-    {
-        free(user_cmd->output);
-    }
-}
-
-
 int main(void)
 {   
-    struct command user_cmd;
+    struct command user_cmd;  // Struct to hold user input
+    char cwd[MAXLINE];  // String array to hold current working directory
 
-    
     // Program name to indicate start of smallsh
     printf("$ smallsh\n");
     fflush(stdout);
@@ -224,28 +193,40 @@ int main(void)
         // Get user input
         getInput(&user_cmd);
 
-        // If user enters exit, exit
-        if (strcmp(user_cmd.cmd, "exit") == 0)
+        // If user_cmd is a comment or empty, continue to next iteration
+        if (strlen(user_cmd.cmd) == 0 || user_cmd.cmd == NULL)
         {
-            freeCommand(&user_cmd);
+            continue;
+        }
+
+        // Check for built-in commands exit, cd, and status and always run in the foreground
+        // otherwise invoke executeOtherCommand to execute other comands by forking a child and using exec() family functions
+        if (strcmp(user_cmd.cmd, "exit") == 0)  // If user enters exit, exit
+        {
             exit(0);
-        }
-
-        // If user enters cd, change directory
-        if (strcmp(user_cmd.cmd, "cd") == 0)
+        } else if (strcmp(user_cmd.cmd, "cd") == 0)  // If user enters cd, change directory
         {
-            if (user_cmd.argc == 1)
-            {
+           // If command is cd and there are no arguments, change to home directory
+              if (user_cmd.argc == 0)
+              {
                 chdir(getenv("HOME"));
-            } else {
-                chdir(user_cmd.argv[1]);
-            }
+                // Print new working directory
+                getcwd(cwd, sizeof(cwd));
+                printf("%s\n", cwd);
+                fflush(stdout);
+
+              } else {
+                // If command is cd and there are arguments, change to the specified directory
+                chdir(user_cmd.argv[0]);
+                getcwd(cwd, sizeof(cwd));
+                printf("%s\n", cwd);
+                fflush(stdout);
+                
+              }
+        } else  // Execute other commands
+        {
+            executeOtherCommand(&user_cmd);
         }
-
-        // Execute other commands
-
-
-
     }
     return 0;
 }
