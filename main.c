@@ -35,7 +35,6 @@ void getInput(struct command *user_cmd)
     char input[MAXLINE];  // String array to hold user input
     // Iterators for $$ variable expansion
     int i;
-    int j;
 
     // Prompt user for input
     printf(": ");
@@ -94,18 +93,21 @@ void getInput(struct command *user_cmd)
             // Replace every instance of $$ in the token with the pid of the process
             for (i = 0; i < strlen(token); i++)
             {
-                if (token[i] == '$' && token[i + 1] == '$')
+                char *temp = strstr(token, "$$");
+
+                if (temp)
                 {
-                    // Iterate through token and replace $$ with pid
-                    for (j = i; j < strlen(token); j++)
-                    {
-                        token[j] = token[j + 1];
-                    }
-                    token[j] = '\0';
-                    char *pid = calloc(strlen(token) + 1, sizeof(char));
+                    // Replace token with string before $$ concatenated with pid
+                    char pid[10];
                     sprintf(pid, "%d", getpid());
-                    strcat(token, pid);
+                    char *temp2 = calloc(strlen(token) + strlen(pid) + 1, sizeof(char));
+                    strncpy(temp2, token, temp - token);
+                    strcat(temp2, pid);
+                    strcat(temp2, temp + 2);
+                    token = temp2;
+                    free(temp2);
                 }
+                free(temp);
             }
             user_cmd->argv[user_cmd->argc] = calloc(strlen(token) + 1, sizeof(char));
             strcpy(user_cmd->argv[user_cmd->argc], token);
@@ -114,6 +116,69 @@ void getInput(struct command *user_cmd)
         token = strtok(NULL, " ");
     }
     free(token);
+
+}
+
+/*
+*  Executes the command stored in the struct other than built-in commands of exit, cd, and status by forking a child process
+*/
+void executeOtherCommand(struct command *user_cmd)
+{
+    int spawn_pid;
+    int status;
+    int fd_in;
+    int fd_out;
+
+    // Fork a child process
+    spawn_pid = fork();
+
+    switch(spawn_pid)
+    {
+        case -1:
+            perror("fork() failed!");
+            exit(1);
+            break;
+        case 0:
+            // If input redirection is specified, open the file and redirect input
+            if (strlen(user_cmd->input) > 0)
+            {
+                fd_in = open(user_cmd->input, O_RDONLY);
+                if (fd_in == -1)
+                {
+                    perror("open");
+                    exit(1);
+                }
+                dup2(fd_in, 0);
+                close(fd_in);
+            }
+
+            // If output redirection is specified, open the file and redirect output
+            if (strlen(user_cmd->output) > 0)
+            {
+                fd_out = open(user_cmd->output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd_out == -1)
+                {
+                    perror("open");
+                    exit(1);
+                }
+                dup2(fd_out, 1);
+                close(fd_out);
+            }
+
+            // Execute the command
+            execvp(user_cmd->cmd, user_cmd->argv);
+            perror("execvp");
+            exit(1);
+            break;
+        default:
+            // If background execution is specified, wait for the child process to finish
+            if (user_cmd->background)
+            {
+                waitpid(spawn_pid, &status, WNOHANG);
+            } else {
+                waitpid(spawn_pid, &status, 0);
+            }
+    }
 }
 
 /*
@@ -177,14 +242,10 @@ int main(void)
             }
         }
 
-        // If user enters pwd, print working directory
-        if (strcmp(user_cmd.cmd, "pwd") == 0)
-        {
-            char *cwd = calloc(MAXLINE, sizeof(char));
-            getcwd(cwd, MAXLINE);
-            printf("%s\n", cwd);
-            free(cwd);
-        }
+        // Execute other commands
+
+
+
     }
     return 0;
 }
