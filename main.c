@@ -15,9 +15,9 @@
 # define MAXJOBS 200  // Limit of jobs in processes list
 
 // Global variables
-int processes[MAXJOBS];
-int exit_status;
-int childStatus;
+int processes[MAXJOBS];  // List of processes
+int exit_status;  // Exit status of last process
+int childStatus;  // Status of last child process
 
 // Struct for processes
 typedef struct process {
@@ -75,13 +75,21 @@ command *parse_cmd(char *line) {
             cmd->background = true;
             token = strtok(NULL, " ");
         } else if (strcmp(token, ">") == 0) {
+            // Change token to the next token and set outfile to the token
+            token = strtok(NULL, " ");
             // Set the output file
-            cmd->outfile = strtok(NULL, " ");
+            cmd->outfile = token;
+            // Set the next token to NULL
             token = strtok(NULL, " ");
+            continue;
         } else if (strcmp(token, "<") == 0) {
-            // Set the input file
-            cmd->infile = strtok(NULL, " ");
+            // Change token to the next token and set infile to the token
             token = strtok(NULL, " ");
+            // Set the input file
+            cmd->infile = token;
+            // Set the next token to NULL
+            token = strtok(NULL, " ");
+            continue;
         } else {
             // Add the token to the args array
             cmd->args[i] = token;
@@ -93,12 +101,37 @@ command *parse_cmd(char *line) {
     return cmd;
 }
 
+void expand_variable(struct command *cmd) {
+    // Check if any arguments has a "$$" in it
+    for (int i = 0; i < cmd->argc; i++) {
+        // Change all instances of "$$" with the pid of the current process until no more instances are found
+        while (strstr(cmd->args[i], "$$") != NULL) {
+            // Get the pid of the current process
+            char pid[10];
+            sprintf(pid, "%d", getpid());
+
+            // Replace all instances of "$$" with the pid
+            char *temp = cmd->args[i];  // Store the current argument
+            char *temp2 = strstr(cmd->args[i], "$$");  // Store the location of the "$$"
+            char *temp3 = malloc(sizeof(char) * (strlen(temp) - 2));  // Store the new argument
+            strncpy(temp3, temp, temp2 - temp);  // Copy the first part of the argument
+            strcat(temp3, pid);  // Add the pid to the new argument
+            strcat(temp3, temp2 + 2);  // Add the rest of the argument  
+            strcpy(cmd->args[i], temp3);  // Copy the new argument into the old argument
+            free(temp3);  // Free the new argument
+        }
+    }
+}
+
 /*
 *  Execute the command arguments
 */
 void execute_cmd(command *cmd) {
     int fd[2];  // 0 is read, 1 is write
-    pid_t spawnPid;
+    pid_t spawnPid = -5;  // PID of child process
+
+    // Check all arguments for "$$" substring and replace with the PID of the current process
+    expand_variable(cmd);
 
     // Check if the command is a built-in command
     if (strcmp(cmd->args[0], "exit") == 0) {
@@ -115,57 +148,59 @@ void execute_cmd(command *cmd) {
         // Print the exit status or terminating signal of the last foreground process
         if (WIFEXITED(childStatus)) {
             printf("exit value %d\n", WEXITSTATUS(childStatus));
+            fflush(stdout);
         } else if (WIFSIGNALED(childStatus)) {
             printf("terminated by signal %d\n", WTERMSIG(childStatus));
+            fflush(stdout);
         }
     } else {
         // Fork a child process
-        if ((spawnPid = fork()) == 0) {
+        spawnPid = fork();
+
+        if (spawnPid == -1)
+        {
+            perror("fork() failed!");
+            fflush(stdout);
+            exit(1);
+        } else if (spawnPid == 0)
+        {
+            // Child process
             // Check if the command has an input file
             if (cmd->infile != NULL) {
-                // Open the file for reading
-                if ((fd[0] = open(cmd->infile, O_RDONLY)) == -1) {
-                    perror("open");
+                // Open the input file
+                fd[0] = open(cmd->infile, O_RDONLY);
+                // Check if the file was opened successfully
+                if (fd[0] == -1) {
+                    printf("Error: cannot open %s for input\n", cmd->infile);
+                    fflush(stdout);
                     exit(1);
                 }
-                // Close stdin
-                close(0);
-                // Connect stdin to the input file
                 dup2(fd[0], 0);
-                // Close the input file
                 close(fd[0]);
             }
             // Check if the command has an output file
             if (cmd->outfile != NULL) {
-                // Open the file for writing
-                if ((fd[1] = open(cmd->outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1) {
-                    perror("open");
+                // Open the output file
+                fd[1] = open(cmd->outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                // Check if the file was opened successfully
+                if (fd[1] == -1) {
+                    printf("Error: cannot open %s for output\n", cmd->outfile);
+                    fflush(stdout);
                     exit(1);
                 }
-                // Close stdout
-                close(1);
-                // Connect stdout to the output file
                 dup2(fd[1], 1);
-                // Close the output file
                 close(fd[1]);
             }
             // Execute the command
             execvp(cmd->args[0], cmd->args);
-            // If the command is not found, print the error
             perror(cmd->args[0]);
-            exit(1);
-        } else if (spawnPid < 0) {
-            perror("fork");
+            fflush(stdout);
             exit(1);
         } else {
-            // Check if the command is a background process
-            if (cmd->background) {
-                // Add the child process to the processes list
-                processes[childStatus] = spawnPid;
-            } else {
-                // Wait for the child process to finish
-                waitpid(spawnPid, &childStatus, 0);
-            }
+            // Parent process
+            // Wait for the child process to finish
+            spawnPid = waitpid(spawnPid, &childStatus, 0);
+            // Check if the child process was stopped
         }
     }
 }
@@ -188,15 +223,17 @@ int main(void)
 
         // If user input is empty or a comment, continue
         if (input[0] == '\0' || input[0] == '#') {
+            free(input);
+            free(cmd);
             continue;
+        } else {
+            // Parse the input line into a command struct
+            cmd = parse_cmd(input);
+
+            // Execute user input
+            execute_cmd(cmd);
         }
-
-        // Parse the input line into a command struct
-        cmd = parse_cmd(input);
-
-        // Execute user input
-        execute_cmd(cmd);
-
+        // Free the command struct and the input string
         free(cmd);
         free(input);
     }
