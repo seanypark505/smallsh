@@ -18,14 +18,7 @@
 int processes[MAXJOBS];  // List of processes
 int exit_status;  // Exit status of last process
 int childStatus;  // Status of last child process
-
-// Struct for processes
-typedef struct process {
-    pid_t pid;
-    char *cmd;
-    int status;
-    bool stopped;
-} process;
+int fg_only_mode;  // Flag for foreground mode (1 = on, 0 = off)
 
 // Struct for commands
 typedef struct command {
@@ -35,6 +28,52 @@ typedef struct command {
     char *outfile;
     bool background;
 } command;
+
+// Struct for sigaction
+typedef struct sigaction {
+    void (*sa_handler)(int);
+    sigset_t sa_mask;
+    int sa_flags;
+} sigaction;
+
+// SIGINT sigaction handler
+void catchSIGINT(int signo)
+{
+    char *message = "Terminated by signal";
+    // Convert signal number to string
+    char *signal = malloc(sizeof(char) * 10);
+    sprintf(signal, "%d", signo);
+    // Concatenate message and signal
+    char *final = malloc(sizeof(char) * (strlen(message) + strlen(signal) + 1));
+    strcpy(final, message);
+    strcat(final, signal);
+    // Print message
+    write(STDOUT_FILENO, final, strlen(final));
+    fflush(stdout);
+    free(signal);
+    free(final);
+}
+
+// SIGTSTP sigaction handler
+void catchSIGTSTP(int signo)
+{
+    char *fg_on = "Entering foreground-only mode (& is now ignored)\n";
+    char *fg_off = "Exiting foreground-only mode\n";
+
+    // If foreground mode is on, turn off and print message
+    if (fg_only_mode == 1) 
+    {
+        fg_only_mode = 0;
+        write(STDOUT_FILENO, fg_off, strlen(fg_off));
+        fflush(stdout);
+    } else
+    {
+        // If foreground mode is off, turn on and print message
+        fg_only_mode = 1;
+        write(STDOUT_FILENO, fg_on, strlen(fg_on));
+        fflush(stdout);
+    }
+}
 
 /*
 *  Return user input string
@@ -200,13 +239,28 @@ void execute_cmd(command *cmd) {
             // Parent process
             // Wait for the child process to finish
             spawnPid = waitpid(spawnPid, &childStatus, 0);
-            // Check if the child process was stopped
         }
     }
 }
 
 int main(void)
 {
+    // Initialize signal structs
+    sigaction SIGINT_action = {0}, SIGTSTP_action = {0};
+    // SIGINT
+    SIGINT_action.sa_handler = catchSIGINT;
+    sigfillset(&SIGINT_action.sa_mask);
+    SIGINT_action.sa_flags = 0;
+
+    // SIGTSTP
+    SIGTSTP_action.sa_handler = catchSIGTSTP;
+    sigfillset(&SIGTSTP_action.sa_mask);
+    SIGTSTP_action.sa_flags = 0;
+
+    // Register the signal handlers
+    sigaction(SIGINT, &SIGINT_action, NULL);
+    sigaction(SIGTSTP, &SIGTSTP_action, NULL);
+    
     printf("$ smallsh\n");
     fflush(stdout);
 
