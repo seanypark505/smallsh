@@ -15,10 +15,12 @@
 # define MAXJOBS 200  // Limit of jobs in processes list
 
 // Global variables
-int processes[MAXJOBS];  // List of processes
+// int processes[MAXJOBS];  // List of processes
 int exit_status;  // Exit status of last process
 int childStatus;  // Status of last child process
 int fg_only_mode;  // Flag for foreground mode (1 = on, 0 = off)
+int bg_jobs[MAXJOBS];  // List of background jobs
+int bg_jobs_count;  // Number of background jobs
 
 // Struct for commands
 typedef struct command {
@@ -30,13 +32,6 @@ typedef struct command {
     bool infile_redirect;
     bool outfile_redirect;
 } command;
-
-// Struct for sigaction
-typedef struct sigaction {
-    void (*sa_handler)(int);
-    sigset_t sa_mask;
-    int sa_flags;
-} sigaction;
 
 // SIGINT sigaction handler
 void handle_SIGINT(int signo)
@@ -69,19 +64,7 @@ void handle_SIGTSTP(int signo)
     }
 }
 
-// SIGCHLD sigaction handler
-void handle_SIGCHLD(int signo)
-{
-    // Wait for a child background process to finish and print the pid and exit status
-    int pid = waitpid(-1, &childStatus, WNOHANG);
-    if (pid > 0)
-    {
-        char message[50];
-        sprintf(message, "Background process %d exited with status %d\n", pid, WEXITSTATUS(childStatus));
-        write(STDOUT_FILENO, message, 50);
-        fflush(stdout);
-    }
-}
+
 
 /*
 *  Return user input string
@@ -192,12 +175,10 @@ void execute_cmd(command *cmd) {
 
     if (cmd->background == false) {
         // SIGINT terminates the foreground process
-        SIGINT_action.sa_handler = handle_SIGINT;
-        sigaction(SIGINT, &sigint_action, NULL);
+        signal(SIGINT, handle_SIGINT);
 
-        // Foreground process ignores SIGTSTP
-        SIGTSTP_action.sa_handler = SIG_IGN;
-        sigaction(SIGTSTP, &sigtstp_action, NULL);
+        // SIGTSTP is ignored
+        signal(SIGTSTP, SIG_IGN);
     }
 
     // Check if the command is a built-in command
@@ -331,18 +312,42 @@ void execute_cmd(command *cmd) {
                 // Wait for the child process to finish
                 waitpid(spawnPid, &childStatus, 0);
             } else if (cmd->background == true) {
+                // Continue executing the shell
+                waitpid(spawnPid, &childStatus, WNOHANG);
                 // Print the PID of the child process
                 printf("Background command with pid %d has begun\n", spawnPid);
+                fflush(stdout);
+            }
+        }
+        // Print the pid and status of any background processes that have finished
+        while (spawnPid = waitpid(-1, &childStatus, WNOHANG) > 0) {
+            printf("Background pid %d is done: ", spawnPid);
+            if (WIFEXITED(childStatus)) {
+                printf("exit value %d\n", WEXITSTATUS(childStatus));
+                fflush(stdout);
+            } else if (WIFSIGNALED(childStatus)) {
+                printf("terminated by signal %d\n", WTERMSIG(childStatus));
                 fflush(stdout);
             }
         }
     }
 }
 
+/*
+*  Adds the background process to the list of background processes
+*/
+void add_background_process(pid_t pid) {
+    // Add the child process to bg_jobs
+    bg_jobs[bg_jobs_count] = pid;
+    bg_jobs_count++;
+}
+
 int main(void)
 {
+    // Initialize the count of background jobs
+    bg_jobs_count = 0;
     // Initialize signal structs
-    sigaction SIGINT_action = {0}, SIGTSTP_action = {0};
+    struct sigaction SIGINT_action = {0}, SIGTSTP_action = {0};
     // SIGINT
     SIGINT_action.sa_handler = SIG_IGN;
     sigfillset(&SIGINT_action.sa_mask);
@@ -367,8 +372,6 @@ int main(void)
 
         // Initialize the command struct
         command *cmd = malloc(sizeof(command));
-
-        signal(SIGCHLD, handle_SIGCHLD);
 
         // Read user input
         read_cmd(input);
