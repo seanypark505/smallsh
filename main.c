@@ -18,7 +18,7 @@
 // int processes[MAXJOBS];  // List of processes
 int exit_status;  // Exit status of last process
 int childStatus;  // Status of last child process
-int fg_only_mode;  // Flag for foreground mode (1 = on, 0 = off)
+bool fg_only_mode;  // Flag for foreground mode
 
 // Struct for commands
 typedef struct command {
@@ -48,14 +48,14 @@ void handle_SIGTSTP(int signo)
     char *fg_off = "Exiting foreground-only mode\n";
 
     // If foreground mode is on, turn off and print message
-    if (fg_only_mode == 1) 
+    if (fg_only_mode) 
     {
-        fg_only_mode = 0;
+        fg_only_mode = false;
         write(STDOUT_FILENO, fg_off, 30);
     } else
     {
         // If foreground mode is off, turn on and print message
-        fg_only_mode = 1;
+        fg_only_mode = true;
         write(STDOUT_FILENO, fg_on, 50);
     }
 }
@@ -169,7 +169,7 @@ void execute_cmd(command *cmd) {
     expand_variable(cmd);
 
     // Check for foreground only mode
-    if (fg_only_mode == 1) {
+    if (fg_only_mode) {
         // If foreground only mode is on, set the process to be run in the foreground
         cmd->background = false;
     }
@@ -238,7 +238,7 @@ void execute_cmd(command *cmd) {
                     close(fd[1]);
                 }
             } else if (cmd->background == true) {  // If command contained '&' at the end, set the child process to run in the background
-                signal(SIGINT, SIG_IGN);  // Ignore SIGINT signal in child process
+                signal(SIGINT, SIG_IGN);  // Ignore SIGINT signal in background child process
                 // Check for inputfile redirection
                 if (cmd->infile_redirect == true) {
                     if (cmd->infile != NULL) {
@@ -289,6 +289,7 @@ void execute_cmd(command *cmd) {
                     }
                 }
             }
+            
             // Execute the command
             execvp(cmd->args[0], cmd->args);
             perror(cmd->args[0]);
@@ -327,6 +328,7 @@ void execute_cmd(command *cmd) {
 
 int main(void)
 {
+    fg_only_mode = false;
     // Initialize signal structs
     struct sigaction SIGINT_action = {{0}};
     struct sigaction SIGTSTP_action = {{0}};
@@ -366,12 +368,11 @@ int main(void)
         } else {
             // Parse the input line into a command struct
             cmd = parse_cmd(input);
-            free(input);
-
             // Execute user input
             execute_cmd(cmd);
-            free(cmd);
         }
+        free(input);
+        free(cmd);
         fflush(stdout);
     }
     return 0;
