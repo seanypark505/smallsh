@@ -52,13 +52,11 @@ void handle_SIGTSTP(int signo)
     {
         fg_only_mode = 0;
         write(STDOUT_FILENO, fg_off, 30);
-        fflush(stdout);
     } else
     {
         // If foreground mode is off, turn on and print message
         fg_only_mode = 1;
         write(STDOUT_FILENO, fg_on, 50);
-        fflush(stdout);
     }
 }
 
@@ -66,10 +64,6 @@ void handle_SIGTSTP(int signo)
 *  Return user input string
 */
 char *read_cmd(char *input) {
-    // Signals
-    signal(SIGINT, SIG_IGN);
-    signal(SIGTSTP, handle_SIGTSTP);
-
     // Prompt user for input
     printf(": ");
     fflush(stdout);
@@ -363,7 +357,6 @@ int main(void)
 
         // Read user input
         read_cmd(input);
-
 
         // If user input is empty or a comment, continue
         if (input[0] == '\0' || input[0] == '#') {
