@@ -19,8 +19,6 @@
 int exit_status;  // Exit status of last process
 int childStatus;  // Status of last child process
 int fg_only_mode;  // Flag for foreground mode (1 = on, 0 = off)
-int bg_jobs[MAXJOBS];  // List of background jobs
-int bg_jobs_count;  // Number of background jobs
 
 // Struct for commands
 typedef struct command {
@@ -64,12 +62,14 @@ void handle_SIGTSTP(int signo)
     }
 }
 
-
-
 /*
 *  Return user input string
 */
 char *read_cmd(char *input) {
+    // Signals
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTSTP, handle_SIGTSTP);
+
     // Prompt user for input
     printf(": ");
     fflush(stdout);
@@ -103,9 +103,13 @@ command *parse_cmd(char *line) {
     token = strtok(line, " ");
     while (token != NULL) {
         // Check for background, if found and it is the last token, set background to true
-        if (strcmp(token, "&") == 0 && i == strlen(line) - 1) {
+        if (strcmp(token, "&") == 0) {
             cmd->background = true;
             token = strtok(NULL, " ");
+            continue;
+        } else if (strcmp(token, "&") == 0 && i != strlen(line) - 1){
+            cmd->args[i] = token;
+            i++;
         } else if (strcmp(token, ">") == 0) {
             cmd->outfile_redirect = true;
             // Change token to the next token and set outfile to the token
@@ -131,7 +135,10 @@ command *parse_cmd(char *line) {
         }
         token = strtok(NULL, " ");
     }
+    // Set the argc to the number of args
     cmd->argc = i;
+    // Null terminate the args array
+    cmd->args[i] = NULL;
     return cmd;
 }
 
@@ -173,14 +180,6 @@ void execute_cmd(command *cmd) {
         cmd->background = false;
     }
 
-    if (cmd->background == false) {
-        // SIGINT terminates the foreground process
-        signal(SIGINT, handle_SIGINT);
-
-        // SIGTSTP is ignored
-        signal(SIGTSTP, SIG_IGN);
-    }
-
     // Check if the command is a built-in command
     if (strcmp(cmd->args[0], "exit") == 0) {
         exit(0);
@@ -210,12 +209,14 @@ void execute_cmd(command *cmd) {
             perror("fork() failed!");
             fflush(stdout);
             exit(1);
-        } else if (spawnPid == 0)
+        } else if (spawnPid == 0)  // Child process
         {
-            // Child process
+            signal(SIGTSTP, SIG_IGN);  // Ignore SIGTSTP signal in child process
+
             // Check if background mode is on
             if (cmd->background == false)
             {
+                signal(SIGINT, SIG_DFL);  // Ctrl-C will terminate child process
                 // Check if the command has an input file
                 if (cmd->infile != NULL) {
                     // Open the input file
@@ -242,12 +243,8 @@ void execute_cmd(command *cmd) {
                     dup2(fd[1], 1);
                     close(fd[1]);
                 }
-                // Execute the command
-                execvp(cmd->args[0], cmd->args);
-                perror(cmd->args[0]);
-                fflush(stdout);
-                exit(1);
             } else if (cmd->background == true) {  // If command contained '&' at the end, set the child process to run in the background
+                signal(SIGINT, SIG_IGN);  // Ignore SIGINT signal in child process
                 // Check for inputfile redirection
                 if (cmd->infile_redirect == true) {
                     if (cmd->infile != NULL) {
@@ -297,12 +294,12 @@ void execute_cmd(command *cmd) {
                         }
                     }
                 }
-                // Execute the command
-                execvp(cmd->args[0], cmd->args);
-                perror(cmd->args[0]);
-                fflush(stdout);
-                exit(1);
             }
+            // Execute the command
+            execvp(cmd->args[0], cmd->args);
+            perror(cmd->args[0]);
+            fflush(stdout);
+            exit(1);
         } else
         {
             // Parent process
@@ -320,8 +317,9 @@ void execute_cmd(command *cmd) {
             }
         }
         // Print the pid and status of any background processes that have finished
-        while (spawnPid = waitpid(-1, &childStatus, WNOHANG) > 0) {
+        while ((spawnPid = waitpid(-1, &childStatus, WNOHANG)) > 0) {
             printf("Background pid %d is done: ", spawnPid);
+            fflush(stdout);
             if (WIFEXITED(childStatus)) {
                 printf("exit value %d\n", WEXITSTATUS(childStatus));
                 fflush(stdout);
@@ -333,21 +331,11 @@ void execute_cmd(command *cmd) {
     }
 }
 
-/*
-*  Adds the background process to the list of background processes
-*/
-void add_background_process(pid_t pid) {
-    // Add the child process to bg_jobs
-    bg_jobs[bg_jobs_count] = pid;
-    bg_jobs_count++;
-}
-
 int main(void)
 {
-    // Initialize the count of background jobs
-    bg_jobs_count = 0;
     // Initialize signal structs
-    struct sigaction SIGINT_action = {0}, SIGTSTP_action = {0};
+    struct sigaction SIGINT_action = {{0}};
+    struct sigaction SIGTSTP_action = {{0}};
     // SIGINT
     SIGINT_action.sa_handler = SIG_IGN;
     sigfillset(&SIGINT_action.sa_mask);
@@ -356,7 +344,7 @@ int main(void)
     // SIGTSTP
     SIGTSTP_action.sa_handler = handle_SIGTSTP;
     sigfillset(&SIGTSTP_action.sa_mask);
-    SIGTSTP_action.sa_flags = SA_RESTART;
+    SIGTSTP_action.sa_flags = 0;
 
     // Register the signal handlers
     sigaction(SIGINT, &SIGINT_action, NULL);
@@ -376,6 +364,7 @@ int main(void)
         // Read user input
         read_cmd(input);
 
+
         // If user input is empty or a comment, continue
         if (input[0] == '\0' || input[0] == '#') {
             free(input);
@@ -384,13 +373,13 @@ int main(void)
         } else {
             // Parse the input line into a command struct
             cmd = parse_cmd(input);
+            free(input);
 
             // Execute user input
             execute_cmd(cmd);
+            free(cmd);
         }
-        // Free the command struct and the input string
-        free(cmd);
-        free(input);
+        fflush(stdout);
     }
     return 0;
 }
