@@ -27,6 +27,8 @@ typedef struct command {
     char *infile;
     char *outfile;
     bool background;
+    bool infile_redirect;
+    bool outfile_redirect;
 } command;
 
 // Struct for sigaction
@@ -37,25 +39,17 @@ typedef struct sigaction {
 } sigaction;
 
 // SIGINT sigaction handler
-void catchSIGINT(int signo)
+void handle_SIGINT(int signo)
 {
-    char *message = "Terminated by signal";
-    // Convert signal number to string
-    char *signal = malloc(sizeof(char) * 10);
-    sprintf(signal, "%d", signo);
+    char message[30];
+    sprintf(message,  "Terminated by signal %d\n", signo);
     // Concatenate message and signal
-    char *final = malloc(sizeof(char) * (strlen(message) + strlen(signal) + 1));
-    strcpy(final, message);
-    strcat(final, signal);
-    // Print message
-    write(STDOUT_FILENO, final, strlen(final));
+    write(STDOUT_FILENO, message, 30);
     fflush(stdout);
-    free(signal);
-    free(final);
 }
 
 // SIGTSTP sigaction handler
-void catchSIGTSTP(int signo)
+void handle_SIGTSTP(int signo)
 {
     char *fg_on = "Entering foreground-only mode (& is now ignored)\n";
     char *fg_off = "Exiting foreground-only mode\n";
@@ -64,13 +58,27 @@ void catchSIGTSTP(int signo)
     if (fg_only_mode == 1) 
     {
         fg_only_mode = 0;
-        write(STDOUT_FILENO, fg_off, strlen(fg_off));
+        write(STDOUT_FILENO, fg_off, 30);
         fflush(stdout);
     } else
     {
         // If foreground mode is off, turn on and print message
         fg_only_mode = 1;
-        write(STDOUT_FILENO, fg_on, strlen(fg_on));
+        write(STDOUT_FILENO, fg_on, 50);
+        fflush(stdout);
+    }
+}
+
+// SIGCHLD sigaction handler
+void handle_SIGCHLD(int signo)
+{
+    // Wait for a child background process to finish and print the pid and exit status
+    int pid = waitpid(-1, &childStatus, WNOHANG);
+    if (pid > 0)
+    {
+        char message[50];
+        sprintf(message, "Background process %d exited with status %d\n", pid, WEXITSTATUS(childStatus));
+        write(STDOUT_FILENO, message, 50);
         fflush(stdout);
     }
 }
@@ -105,6 +113,8 @@ command *parse_cmd(char *line) {
     cmd->infile = NULL;
     cmd->outfile = NULL;
     cmd->background = false;
+    cmd->infile_redirect = false;
+    cmd->outfile_redirect = false;
 
     // Split the input line into tokens
     token = strtok(line, " ");
@@ -114,6 +124,7 @@ command *parse_cmd(char *line) {
             cmd->background = true;
             token = strtok(NULL, " ");
         } else if (strcmp(token, ">") == 0) {
+            cmd->outfile_redirect = true;
             // Change token to the next token and set outfile to the token
             token = strtok(NULL, " ");
             // Set the output file
@@ -122,6 +133,7 @@ command *parse_cmd(char *line) {
             token = strtok(NULL, " ");
             continue;
         } else if (strcmp(token, "<") == 0) {
+            cmd->infile_redirect = true;
             // Change token to the next token and set infile to the token
             token = strtok(NULL, " ");
             // Set the input file
@@ -172,6 +184,22 @@ void execute_cmd(command *cmd) {
     // Check all arguments for "$$" substring and replace with the PID of the current process
     expand_variable(cmd);
 
+    // Check for foreground only mode
+    if (fg_only_mode == 1) {
+        // If foreground only mode is on, set the process to be run in the foreground
+        cmd->background = false;
+    }
+
+    if (cmd->background == false) {
+        // SIGINT terminates the foreground process
+        SIGINT_action.sa_handler = handle_SIGINT;
+        sigaction(SIGINT, &sigint_action, NULL);
+
+        // Foreground process ignores SIGTSTP
+        SIGTSTP_action.sa_handler = SIG_IGN;
+        sigaction(SIGTSTP, &sigtstp_action, NULL);
+    }
+
     // Check if the command is a built-in command
     if (strcmp(cmd->args[0], "exit") == 0) {
         exit(0);
@@ -204,41 +232,109 @@ void execute_cmd(command *cmd) {
         } else if (spawnPid == 0)
         {
             // Child process
-            // Check if the command has an input file
-            if (cmd->infile != NULL) {
-                // Open the input file
-                fd[0] = open(cmd->infile, O_RDONLY);
-                // Check if the file was opened successfully
-                if (fd[0] == -1) {
-                    printf("Error: cannot open %s for input\n", cmd->infile);
-                    fflush(stdout);
-                    exit(1);
+            // Check if background mode is on
+            if (cmd->background == false)
+            {
+                // Check if the command has an input file
+                if (cmd->infile != NULL) {
+                    // Open the input file
+                    fd[0] = open(cmd->infile, O_RDONLY);
+                    // Check if the file was opened successfully
+                    if (fd[0] == -1) {
+                        printf("Error: cannot open %s for input\n", cmd->infile);
+                        fflush(stdout);
+                        exit(1);
+                    }
+                    dup2(fd[0], 0);
+                    close(fd[0]);
                 }
-                dup2(fd[0], 0);
-                close(fd[0]);
-            }
-            // Check if the command has an output file
-            if (cmd->outfile != NULL) {
-                // Open the output file
-                fd[1] = open(cmd->outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                // Check if the file was opened successfully
-                if (fd[1] == -1) {
-                    printf("Error: cannot open %s for output\n", cmd->outfile);
-                    fflush(stdout);
-                    exit(1);
+                // Check if the command has an output file
+                if (cmd->outfile != NULL) {
+                    // Open the output file
+                    fd[1] = open(cmd->outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    // Check if the file was opened successfully
+                    if (fd[1] == -1) {
+                        printf("Error: cannot open %s for output\n", cmd->outfile);
+                        fflush(stdout);
+                        exit(1);
+                    }
+                    dup2(fd[1], 1);
+                    close(fd[1]);
                 }
-                dup2(fd[1], 1);
-                close(fd[1]);
+                // Execute the command
+                execvp(cmd->args[0], cmd->args);
+                perror(cmd->args[0]);
+                fflush(stdout);
+                exit(1);
+            } else if (cmd->background == true) {  // If command contained '&' at the end, set the child process to run in the background
+                // Check for inputfile redirection
+                if (cmd->infile_redirect == true) {
+                    if (cmd->infile != NULL) {
+                        // Open the input file
+                        fd[0] = open(cmd->infile, O_RDONLY);
+                        // Check if the file was opened successfully
+                        if (fd[0] == -1) {
+                            printf("Error: cannot open %s for input\n", cmd->infile);
+                            fflush(stdout);
+                            exit(1);
+                        }
+                        dup2(fd[0], 0);
+                        close(fd[0]);
+                    } else {
+                        // Use "/dev/null" as the input file
+                        fd[0] = open("/dev/null", O_RDONLY);
+                        // Check if the file was opened successfully
+                        if (fd[0] == -1) {
+                            printf("Error: cannot open /dev/null for input\n");
+                            fflush(stdout);
+                            exit(1);
+                        }
+                    }
+                }
+
+                // Check for outputfile redirection
+                if (cmd->outfile_redirect == true) {
+                    if (cmd->outfile != NULL) {
+                        // Open the output file
+                        fd[1] = open(cmd->outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                        // Check if the file was opened successfully
+                        if (fd[1] == -1) {
+                            printf("Error: cannot open %s for output\n", cmd->outfile);
+                            fflush(stdout);
+                            exit(1);
+                        }
+                        dup2(fd[1], 1);
+                        close(fd[1]);
+                    } else {
+                        // Use "/dev/null" as the output file
+                        fd[1] = open("/dev/null", O_WRONLY);
+                        // Check if the file was opened successfully
+                        if (fd[1] == -1) {
+                            printf("Error: cannot open /dev/null for output\n");
+                            fflush(stdout);
+                            exit(1);
+                        }
+                    }
+                }
+                // Execute the command
+                execvp(cmd->args[0], cmd->args);
+                perror(cmd->args[0]);
+                fflush(stdout);
+                exit(1);
             }
-            // Execute the command
-            execvp(cmd->args[0], cmd->args);
-            perror(cmd->args[0]);
-            fflush(stdout);
-            exit(1);
-        } else {
+        } else
+        {
             // Parent process
-            // Wait for the child process to finish
-            spawnPid = waitpid(spawnPid, &childStatus, 0);
+            // Check if background mode is on
+            if (cmd->background == false)
+            {
+                // Wait for the child process to finish
+                waitpid(spawnPid, &childStatus, 0);
+            } else if (cmd->background == true) {
+                // Print the PID of the child process
+                printf("Background command with pid %d has begun\n", spawnPid);
+                fflush(stdout);
+            }
         }
     }
 }
@@ -248,14 +344,14 @@ int main(void)
     // Initialize signal structs
     sigaction SIGINT_action = {0}, SIGTSTP_action = {0};
     // SIGINT
-    SIGINT_action.sa_handler = catchSIGINT;
+    SIGINT_action.sa_handler = SIG_IGN;
     sigfillset(&SIGINT_action.sa_mask);
     SIGINT_action.sa_flags = 0;
 
     // SIGTSTP
-    SIGTSTP_action.sa_handler = catchSIGTSTP;
+    SIGTSTP_action.sa_handler = handle_SIGTSTP;
     sigfillset(&SIGTSTP_action.sa_mask);
-    SIGTSTP_action.sa_flags = 0;
+    SIGTSTP_action.sa_flags = SA_RESTART;
 
     // Register the signal handlers
     sigaction(SIGINT, &SIGINT_action, NULL);
@@ -271,6 +367,8 @@ int main(void)
 
         // Initialize the command struct
         command *cmd = malloc(sizeof(command));
+
+        signal(SIGCHLD, handle_SIGCHLD);
 
         // Read user input
         read_cmd(input);
